@@ -17,25 +17,25 @@ const client = new Client({
     ]
 });
 
-const activeBots = new Map();
+// Track active bot instance on this worker
+let activeBotInstance = null;
 
 client.once('ready', () => {
     console.log(`🤖 AFK Worker Bot logged in as ${client.user.tag}`);
 });
 
-// ---- DISCORD COMMAND LISTENER ----
+// ---- WORKER DISCORD COMMANDS ----
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
 
-    // Command Syntax: $deploy <botName> <server_ip> [port]
+    // Syntax: $deploy <server_ip> [port]
     if (message.content.startsWith('$deploy')) {
         const args = message.content.split(/\s+/);
-        const botName = args[1];
-        const ip = args[2];
-        const rawPort = args[3];
+        const ip = args[1];
+        const rawPort = args[2];
 
-        if (!botName || !ip) {
-            return message.reply('❌ Use syntax: `$deploy <botName> <server_ip> [port]`');
+        if (!ip) {
+            return message.reply('❌ Use syntax: `$deploy <server_ip> [port]`');
         }
 
         let port = null;
@@ -43,53 +43,47 @@ client.on('messageCreate', async (message) => {
             port = parseInt(rawPort);
         }
 
-        // Clean up previous instance if running
-        if (activeBots.has(botName)) {
-            const existing = activeBots.get(botName);
-            if (existing && existing.instance) {
-                existing.shouldReconnect = false;
-                try { existing.instance.quit(); } catch (e) {}
-            }
-            activeBots.delete(botName);
+        // Stop existing instance if already running
+        if (activeBotInstance) {
+            try {
+                activeBotInstance.quit();
+            } catch (e) {}
+            activeBotInstance = null;
         }
 
         const displayEndpoint = port ? `${ip}:${port}` : ip;
-        message.reply(`⚙️ Deploying worker node \`${botName}\` onto target \`${displayEndpoint}\`...`);
+        message.reply(`⚙️ Deploying AFK bot onto target server \`${displayEndpoint}\`...`);
         
-        launchMinecraftBot(botName, ip, port, message);
+        launchMinecraftBot(ip, port, message);
     }
 
-    // Manual Stop Command: $stopbot <botName>
+    // Manual Stop Command: $stopbot
     if (message.content.startsWith('$stopbot')) {
-        const args = message.content.split(/\s+/);
-        const botName = args[1];
-        if (activeBots.has(botName)) {
-            const botState = activeBots.get(botName);
-            botState.shouldReconnect = false;
-            if (botState.instance) {
-                try { botState.instance.quit(); } catch (e) {}
-            }
-            activeBots.delete(botName);
-            return message.reply(`🛑 Bot node \`${botName}\` stopped and connection blocked.`);
+        if (activeBotInstance) {
+            try {
+                activeBotInstance.quit();
+            } catch (e) {}
+            activeBotInstance = null;
+            return message.reply(`🛑 AFK bot has been stopped and disconnected.`);
         } else {
-            return message.reply(`❌ No active bot found with name \`${botName}\`.`);
+            return message.reply(`❌ No active bot running right now.`);
         }
     }
 });
 
-// ---- MINECRAFT AUTOMATION ENGINE ----
-function launchMinecraftBot(botName, host, port, discordContext) {
-    console.log(`📡 Connecting client ${botName} to ${host}:${port || 'default'}`);
-
+// ---- ROBUST MINECRAFT AUTOMATION ENGINE ----
+function launchMinecraftBot(host, port, discordContext) {
+    const botName = process.env.BOT_USERNAME || `VorstyAFK_${Math.floor(100 + Math.random() * 900)}`;
     const botPassword = `VorstyPass_${Math.floor(100 + Math.random() * 900)}`;
 
-    // Fixed Mineflayer Connection Options
+    console.log(`📡 Connecting client to ${host}:${port || 'default'}`);
+
     const botOptions = {
         host: host,
         username: botName,
         auth: 'offline',
-        version: false, // Auto-detect server MC version (Fixes protocol mismatch)
-        checkTimeoutInterval: 90000,
+        version: false, // Auto-detect Minecraft version (prevents version mismatch issues)
+        checkTimeoutInterval: 120000,
         viewDistance: 'tiny'
     };
 
@@ -100,22 +94,17 @@ function launchMinecraftBot(botName, host, port, discordContext) {
     let bot;
     try {
         bot = mineflayer.createBot(botOptions);
+        activeBotInstance = bot;
     } catch (err) {
-        const errMsg = err.message || err.toString() || 'Unknown instantiation error';
-        return discordContext.channel.send(`❌ **Launch Error:** Failed to create bot \`${botName}\`: \`${errMsg}\``);
+        const errMsg = err?.message || err?.toString() || 'Instantiation error';
+        return discordContext.channel.send(`❌ **Launch Error:** Failed to create bot: \`${errMsg}\``);
     }
 
-    const botState = {
-        instance: bot,
-        moveLoop: null,
-        jumpLoop: null,
-        chatLoop: null,
-        shouldReconnect: false
-    };
+    let moveInterval = null;
+    let jumpInterval = null;
+    let chatInterval = null;
 
-    activeBots.set(botName, botState);
-
-    // Auto Register & Login
+    // Auto Register & Login for AuthMe plugins
     bot.on('message', (jsonMsg) => {
         const chatMessage = jsonMsg.toString().toLowerCase();
 
@@ -138,8 +127,8 @@ function launchMinecraftBot(botName, host, port, discordContext) {
 
     bot.once('spawn', () => {
         const targetStr = port ? `${host}:${port}` : host;
-        console.log(`[${botName}] Successfully joined${targetStr}`);
-        discordContext.channel.send(`✅ Client \`${botName}\` successfully attached to \`${targetStr}\`!`);
+        console.log(`[AFK Bot] Successfully spawned and joined ${targetStr}`);
+        discordContext.channel.send(`✅ AFK Bot successfully joined server \`${targetStr}\`!`);
 
         setTimeout(() => {
             if (bot && bot.entity) {
@@ -148,8 +137,8 @@ function launchMinecraftBot(botName, host, port, discordContext) {
             }
         }, 2000);
 
-        // Movement Loop
-        botState.moveLoop = setInterval(() => {
+        // Anti-AFK Random Look & Move Loop
+        moveInterval = setInterval(() => {
             if (!bot || !bot.entity) return;
             const randomYaw = (Math.random() * 360) * (Math.PI / 180);
             const randomPitch = ((Math.random() * 60) - 30) * (Math.PI / 180);
@@ -163,14 +152,14 @@ function launchMinecraftBot(botName, host, port, discordContext) {
         }, 4000);
 
         // Jump Loop
-        botState.jumpLoop = setInterval(() => {
+        jumpInterval = setInterval(() => {
             if (!bot || !bot.entity) return;
             bot.setControlState('jump', true);
             setTimeout(() => { if (bot && bot.entity) bot.setControlState('jump', false); }, 500);
         }, 11000);
 
-        // Ad Message Loop
-        botState.chatLoop = setInterval(() => {
+        // Promotional Chat Loop
+        chatInterval = setInterval(() => {
             if (!bot || !bot.entity) return;
             bot.chat("MADE BY - VORSTYAFK");
         }, 30 * 60000);
@@ -180,27 +169,27 @@ function launchMinecraftBot(botName, host, port, discordContext) {
         try { bot.respawn(); } catch (err) {}
     });
 
-    // Disconnect Handler
     bot.on('end', (reason) => {
-        console.log(`🔌 [${botName}] Disconnected. Reason: ${reason}`);
-        clearInterval(botState.moveLoop);
-        clearInterval(botState.jumpLoop);
-        clearInterval(botState.chatLoop);
+        console.log(`🔌 AFK Bot disconnected. Reason: ${reason}`);
+        clearInterval(moveInterval);
+        clearInterval(jumpInterval);
+        clearInterval(chatInterval);
 
-        const cleanReason = reason || 'Server refused connection (socket closed)';
+        const cleanReason = reason || 'Connection closed';
         try {
-            discordContext.channel.send(`⚠️ **Alert:** Bot node \`${botName}\` disconnected. Reason: \`${cleanReason}\`.`);
+            discordContext.channel.send(`⚠️ **Alert:** AFK Bot disconnected. Reason: \`${cleanReason}\`.`);
         } catch (e) {}
 
-        activeBots.delete(botName);
+        if (activeBotInstance === bot) {
+            activeBotInstance = null;
+        }
     });
 
-    // Error Handler with proper error extraction
     bot.on('error', (err) => {
         const errorDetails = err?.message || err?.code || (typeof err === 'object' ? JSON.stringify(err) : String(err));
-        console.log(`[${botName}] Error:${errorDetails}`);
+        console.log(`[AFK Bot] Error: ${errorDetails}`);
         try {
-            discordContext.channel.send(`❌ **Error Alert:** Bot node \`${botName}\` error: \`${errorDetails}\``);
+            discordContext.channel.send(`❌ **Error Alert:** AFK Bot error: \`${errorDetails}\``);
         } catch (e) {}
     });
 }
